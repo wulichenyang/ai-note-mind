@@ -1,0 +1,87 @@
+// Prisma 数据模型定义 —— 这是整个后端的"地基"
+// 提示词阶段 1：定义 User / Note / Tag / Chat / ChatMessage 五张表
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 用户表
+// passwordHash 可空：使用 Google OAuth 登录的用户没有密码
+model User {
+  id                String    @id @default(cuid()) // cuid 是分布式友好的主键
+  email             String    @unique // 邮箱唯一，作为登录标识
+  name              String?
+  passwordHash      String?   @map("password_hash")
+  aiApiKeyEncrypted String?   @map("ai_api_key_encrypted") // 用户自带的 DeepSeek Key（AES-256-GCM 加密后存储，前端不可见）
+  aiModel           String?   @map("ai_model") // 用户选择的模型，默认 deepseek-chat
+  notes             Note[] // 一对多：一个用户有多篇笔记
+  tags              Tag[]
+  chats             Chat[]
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@map("users")
+}
+
+// 笔记表
+model Note {
+  id        String   @id @default(cuid())
+  title     String
+  content   String   @db.Text // 存 Markdown 原文
+  pinned    Boolean  @default(false) // 置顶
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  // onDelete: Cascade —— 用户被删除时，其笔记自动级联删除
+  tags      Tag[] // 多对多：一篇笔记可挂多个标签
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([authorId]) // 按作者查询是高频操作，加索引
+  @@map("notes")
+}
+
+// 标签表
+model Tag {
+  id      String @id @default(cuid())
+  name    String
+  ownerId String // 标签属于某个用户，实现数据隔离
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  notes   Note[] // 多对多：与 Note 形成隐式关系表
+
+  @@unique([ownerId, name]) // 复合唯一：同一用户下标签名不重复
+  @@index([ownerId])
+  @@map("tags")
+}
+
+// AI 对话会话表
+// updatedAt：最近活跃时间，会话列表按它倒序排列（有新消息的会话置顶）
+model Chat {
+  id        String        @id @default(cuid())
+  title     String
+  authorId  String
+  author    User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  messages  ChatMessage[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([authorId])
+  @@map("chats")
+}
+
+// 会话消息表
+model ChatMessage {
+  id        String   @id @default(cuid())
+  chatId    String
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  role      String // "user" | "assistant"
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([chatId])
+  @@map("chat_messages")
+}
