@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useState } from "react";
 import { usePathname } from "next/navigation";
-import { NotebookPen, LogOut, User as UserIcon, Menu, X, Settings as SettingsIcon } from "lucide-react";
+import {
+  NotebookPen,
+  LogOut,
+  User as UserIcon,
+  Menu,
+  X,
+  Settings as SettingsIcon,
+} from "lucide-react";
 import { signOut } from "next-auth/react";
 
 const links = [
@@ -15,12 +22,33 @@ const links = [
 
 type NavbarClientProps = {
   user: { name?: string | null; email?: string | null } | null;
+  env: string;
 };
 
+// 环境徽章样式：Dev/QA/Staging 用不同颜色区分，生产不显示
+const ENV_BADGES: Record<string, { label: string; className: string } | null> =
+  {
+    dev: {
+      label: "DEV",
+      className: "border-sky-500/25 bg-sky-500/10 text-sky-600",
+    },
+    qa: {
+      label: "QA",
+      className: "border-amber-500/25 bg-amber-500/10 text-amber-600",
+    },
+    staging: {
+      label: "STAGING",
+      className: "border-violet-500/25 bg-violet-500/10 text-violet-600",
+    },
+    production: null, // 生产环境不暴露环境标识
+  };
+
 // iOS 毛玻璃导航条（浅色）：半透明白 + 强模糊 + 细腻底边
-export default function NavbarClient({ user }: NavbarClientProps) {
+export default function NavbarClient({ user, env }: NavbarClientProps) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  // const badge = ENV_BADGES[env] ?? null;
+  const badge = null;
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -63,6 +91,13 @@ export default function NavbarClient({ user }: NavbarClientProps) {
 
         {/* 右侧：桌面端登录态 */}
         <div className="hidden items-center gap-3 md:flex">
+          {badge && (
+            <span
+              className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wide ${badge.className}`}
+            >
+              {badge.label}
+            </span>
+          )}
           {user ? (
             <>
               <span className="flex items-center gap-1.5 text-[13px] font-medium text-zinc-700">
@@ -114,6 +149,15 @@ export default function NavbarClient({ user }: NavbarClientProps) {
       {menuOpen && (
         <div className="border-t border-white/60 bg-white/80 backdrop-blur-2xl md:hidden">
           <div className="mx-auto max-w-6xl px-6 py-3">
+            {badge && (
+              <div className="mb-2 px-4">
+                <span
+                  className={`inline-block rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wide ${badge.className}`}
+                >
+                  {badge.label} 环境
+                </span>
+              </div>
+            )}
             {links.map((link) => {
               const active = isActive(link.href);
               return (
@@ -140,7 +184,10 @@ export default function NavbarClient({ user }: NavbarClientProps) {
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-2 text-[13px] text-zinc-600">
                       <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-[#6366f1] to-[#a855f7]">
-                        <UserIcon className="h-3 w-3 text-white" strokeWidth={2.4} />
+                        <UserIcon
+                          className="h-3 w-3 text-white"
+                          strokeWidth={2.4}
+                        />
                       </span>
                       <span className="max-w-[140px] truncate">
                         {user.name ?? user.email}

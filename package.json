@@ -4,9 +4,22 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:qa": "dotenv -e .env.qa -- next dev",
+    "dev:staging": "dotenv -e .env.staging -- next dev",
     "build": "next build",
+    "build:qa": "dotenv -e .env.qa -- next build",
+    "build:staging": "dotenv -e .env.staging -- next build",
+    "build:prod": "dotenv -e .env.production -- next build",
     "start": "next start",
-    "lint": "eslint"
+    "start:qa": "dotenv -e .env.qa -- next start",
+    "start:staging": "dotenv -e .env.staging -- next start",
+    "start:prod": "dotenv -e .env.production -- next start",
+    "lint": "eslint",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:qa": "dotenv -e .env.qa -- prisma migrate deploy",
+    "db:migrate:staging": "dotenv -e .env.staging -- prisma migrate deploy",
+    "db:migrate:prod": "dotenv -e .env.production -- prisma migrate deploy",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
@@ -30,6 +43,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
