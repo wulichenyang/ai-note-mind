@@ -64,31 +64,36 @@ export async function POST(req: Request) {
     });
   }
 
-  // 2. 持久化用户消息
-  await prisma.chatMessage.create({
-    data: { chatId: chat.id, role: "user", content: trimmed },
-  });
-  // 更新会话"最近活跃时间"（@updatedAt），让本会话在列表中置顶
-  await prisma.chat.update({
-    where: { id: chat.id },
-    data: { updatedAt: new Date() },
-  });
+  // 2. 持久化用户消息 + 更新会话活跃时间
+  //    两次独立写操作放进 $transaction：原子性 + 一次网络往返
+  await prisma.$transaction([
+    prisma.chatMessage.create({
+      data: { chatId: chat.id, role: "user", content: trimmed },
+    }),
+    // 更新"最近活跃时间"（@updatedAt），让本会话在列表中置顶
+    prisma.chat.update({
+      where: { id: chat.id },
+      data: { updatedAt: new Date() },
+    }),
+  ]);
 
-  // 3. 读取历史（最近 20 条，倒序取再反转回正序）
-  const history = await prisma.chatMessage.findMany({
-    where: { chatId: chat.id },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-  });
+  // 3. 两个只读查询独立，并行执行消除 waterfall：
+  //    - 历史消息（最近 20 条，倒序取再反转回正序）
+  //    - RAG 笔记（最近 8 篇标题+摘要，注入 system prompt）
+  const [history, notes] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: { chatId: chat.id },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    }),
+    prisma.note.findMany({
+      where: { authorId: userId },
+      orderBy: { updatedAt: "desc" },
+      take: 8,
+      select: { title: true, content: true },
+    }),
+  ]);
   history.reverse();
-
-  // 4. RAG：取最近 8 篇笔记（标题 + 前 200 字摘要）注入上下文
-  const notes = await prisma.note.findMany({
-    where: { authorId: userId },
-    orderBy: { updatedAt: "desc" },
-    take: 8,
-    select: { title: true, content: true },
-  });
   const ragContext = notes
     .map((n) => `- ${n.title}：${n.content.slice(0, 200)}`)
     .join("\n");

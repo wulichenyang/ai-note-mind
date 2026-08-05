@@ -30,17 +30,19 @@ export default async function NoteDetailPage({
   if (!user) return null;
 
   // findFirst + authorId：非本人笔记直接 404（数据隔离）
-  const note = await prisma.note.findFirst({
-    where: { id, authorId: user.userId },
-    include: { tags: { select: { name: true } } },
-  });
+  // 两个独立查询并行（Promise.all），避免串行等待形成 waterfall
+  const [note, dbUser] = await Promise.all([
+    prisma.note.findFirst({
+      where: { id, authorId: user.userId },
+      include: { tags: { select: { name: true } } },
+    }),
+    // 该用户是否已配置自己的 DeepSeek Key（BYOK，决定 AI 功能是否可用）
+    prisma.user.findUnique({
+      where: { id: user.userId },
+      select: { aiApiKeyEncrypted: true },
+    }),
+  ]);
   if (!note) notFound();
-
-  // 该用户是否已配置自己的 DeepSeek Key（BYOK，决定 AI 功能是否可用）
-  const dbUser = await prisma.user.findUnique({
-    where: { id: user.userId },
-    select: { aiApiKeyEncrypted: true },
-  });
   const hasAiKey = Boolean(dbUser?.aiApiKeyEncrypted);
 
   return (

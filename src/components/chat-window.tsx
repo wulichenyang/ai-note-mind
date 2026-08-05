@@ -1,11 +1,10 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, memo } from "react";
 import { useRouter } from "next/navigation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Send, Square, Sparkles, Loader2, MessageSquareText, Menu } from "lucide-react";
 import ChatSidebar, { type SidebarChat } from "@/components/chat-sidebar";
+import ChatMarkdown from "@/components/chat-markdown";
 
 // 聊天窗口（Client Component）
 // -------------------------------------------------
@@ -40,6 +39,44 @@ const SUGGESTIONS = [
 
 let tempSeq = 0;
 const tmpId = () => `tmp-${Date.now()}-${tempSeq++}`;
+
+// 用户消息气泡：memo 化（rerender-memo）
+// 流式更新时只有最后一条 assistant 消息在变，memo 让其余气泡跳过重渲染
+const UserBubble = memo(function UserBubble({ content }: { content: string }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-gradient-to-br from-[#6366f1] to-[#a855f7] px-4 py-2.5 text-[14px] leading-relaxed text-white shadow-[0_4px_20px_rgba(139,92,246,0.3)]">
+        {content}
+      </div>
+    </div>
+  );
+});
+
+// 助手消息气泡：memo 化，Markdown 走懒加载组件
+const AssistantBubble = memo(function AssistantBubble({
+  content,
+  streaming,
+}: {
+  content: string;
+  streaming: boolean;
+}) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[80%] rounded-2xl rounded-bl-md border border-white/70 bg-white/70 px-4 py-3 text-[14px] leading-relaxed text-zinc-700 shadow-[0_2px_12px_rgba(0,0,0,0.04)] backdrop-blur-xl">
+        {content ? (
+          <ChatMarkdown content={content} />
+        ) : streaming ? (
+          <span className="flex items-center gap-2 text-zinc-400">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            正在思考…
+          </span>
+        ) : (
+          <span className="text-zinc-400">（未生成内容）</span>
+        )}
+      </div>
+    </div>
+  );
+});
 
 export default function ChatWindow({
   chatId: initialChatId,
@@ -257,32 +294,13 @@ export default function ChatWindow({
         ) : (
           messages.map((m) =>
             m.role === "user" ? (
-              // 用户消息：右侧靛蓝紫罗兰渐变气泡
-              <div key={m.id} className="flex justify-end">
-                <div className="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-gradient-to-br from-[#6366f1] to-[#a855f7] px-4 py-2.5 text-[14px] leading-relaxed text-white shadow-[0_4px_20px_rgba(139,92,246,0.3)]">
-                  {m.content}
-                </div>
-              </div>
+              <UserBubble key={m.id} content={m.content} />
             ) : (
-              // 助手消息：左侧玻璃卡片
-              <div key={m.id} className="flex justify-start">
-                <div className="max-w-[80%] rounded-2xl rounded-bl-md border border-white/70 bg-white/70 px-4 py-3 text-[14px] leading-relaxed text-zinc-700 shadow-[0_2px_12px_rgba(0,0,0,0.04)] backdrop-blur-xl">
-                  {m.content ? (
-                    <div className="prose-note">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {m.content}
-                      </ReactMarkdown>
-                    </div>
-                  ) : loading ? (
-                    <span className="flex items-center gap-2 text-zinc-400">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      正在思考…
-                    </span>
-                  ) : (
-                    <span className="text-zinc-400">（未生成内容）</span>
-                  )}
-                </div>
-              </div>
+              <AssistantBubble
+                key={m.id}
+                content={m.content}
+                streaming={loading}
+              />
             ),
           )
         )}
