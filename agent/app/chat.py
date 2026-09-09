@@ -12,14 +12,17 @@ POST /api/chat   body:
   }
 }
 
-图结构（LangGraph，用户选的「LLM 意图路由」方案）：
-  START → judge（LLM 判断该问题是否依赖个人知识库）
-    ├─ need_knowledge=True  → retrieve（文档 chunks + 笔记 note_chunks 联合检索）→ generate
-    └─ need_knowledge=False → generate（普通闲聊，不带检索上下文）
-  generate → END
+图结构（LangGraph，混合意图路由：「向量预检优先 + LLM 兜底」）：
+  START → route_node：
+    1) 先把问题向量化，对「文档 chunks + 笔记 note_chunks」做联合检索；
+    2) 若最相似片段距离 <= SIM_CUTOFF（说明用户知识库里确实有相关内容，
+       例如课程文档撞上“什么是 RAG”这类通用问法）→ 直接判定命中，带上参考；
+    3) 否则才调用 LLM 判断该问题是否依赖个人资料（处理“总结我的笔记”、
+       多轮代词指代等向量不强但语义明确的场景）。
+  → generate_node（命中则带参考生成，未命中则普通对话）→ END
 
 SSE 事件流（供 web BFF 消费，帧语义与 /api/rag 保持一致并扩展）：
-  data: {"mode": "knowledge"|"chat"}         # 意图路由结果（judge 结束即推）
+  data: {"mode": "knowledge"|"chat"}         # 路由结果（route_node 结束即推）
   data: {"sources": [{type,name,content}]}   # 命中时的参考片段（先于正文，type: document|note）
   data: {"token": "..."}                     # 逐 token 正文
   data: {"error": "..."}                     # 异常
@@ -45,6 +48,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 TOP_K = 6          # 最终送入生成的参考片段总数
 PER_TYPE_K = 8     # 文档/笔记各自先取多少，再跨类型合并取 TOP_K
+# 余弦距离 = 1 - 余弦相似度。实测同一主题课程文档命中约 0.29~0.39，
+# 通用闲聊（天气/写诗/自我介绍）约 0.50~0.63，0.45 为清晰分界。
+SIM_CUTOFF = 0.45
 
 
 def _vector_literal(vector: list[float]) -> str:
@@ -113,41 +119,7 @@ def _make_llm(llm_cfg: dict, temperature: float, streaming: bool):
     )
 
 
-# ---------------- 节点 1：LLM 意图路由 ----------------
-def _build_judge_messages(question: str, history: list[dict]) -> list:
-    system = (
-        "你是 NoteMind 的「知识库意图路由器」。只做一件事：判断用户这个问题，"
-        "是否必须依赖「用户自己上传的文档或笔记」才能给出可靠回答。\n"
-        '只输出严格 JSON（不要 Markdown、不要解释）：{"need_knowledge": true 或 false}\n\n'
-        "判断要点：\n"
-        "- 输出 true：问题明显在问用户的个人材料 —— 例如“我笔记/文档/上传的资料里…”“总结我的笔记”"
-        "“我之前记过/上传过…”“我库里的 XX”；或问题引用前面对话中已讨论过的用户资料内容。\n"
-        "- 输出 false：寒暄闲聊、通用知识问答（不查个人资料也能回答）、工具性请求"
-        "（如“帮我润色”“推荐一本书”）、与个人资料无关的问题。\n"
-        "拿不准时倾向 false：宁可普通回答，也不要把闲聊硬塞进知识库检索。"
-    )
-    messages: list = [SystemMessage(content=system)]
-    for item in history[-6:]:  # 只带最近 6 条上下文帮助理解“它/那个文件”这类指代
-        role = item.get("role")
-        content = str(item.get("content", ""))[:1000]
-        if role == "user":
-            messages.append(HumanMessage(content=content))
-        elif role == "assistant":
-            messages.append(AIMessage(content=content))
-    messages.append(HumanMessage(content=question))
-    return messages
-
-
-async def judge_node(state: ChatState) -> dict:
-    """LLM 判断是否需要读知识库（非流式小调用，温度 0 提高稳定性）。"""
-    llm = _make_llm(state.get("llm") or {}, temperature=0.0, streaming=False)
-    resp = await llm.ainvoke(_build_judge_messages(state["question"], state.get("history") or []))
-    need = _parse_need_knowledge(_to_text(resp.content))
-    logger.info("judge user=%s need_knowledge=%s", state["user_id"], need)
-    return {"need_knowledge": need}
-
-
-# ---------------- 节点 2：联合向量检索 ----------------
+# ---------------- 检索（向量预检 + 命中组装） ----------------
 def _embed_query(text: str) -> list[float]:
     """把问题转成 1024 维查询向量（SiliconFlow bge-m3，与入库同模型）。"""
     if not settings.siliconflow_api_key:
@@ -163,7 +135,7 @@ def _embed_query(text: str) -> list[float]:
     return embeddings.embed_query(text)
 
 
-def _retrieve_one_type(sql: str, params: list, query_vec: list[float]) -> list[dict]:
+def _retrieve_one_type(sql: str, params: list) -> list[dict]:
     with db_connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [
@@ -173,12 +145,14 @@ def _retrieve_one_type(sql: str, params: list, query_vec: list[float]) -> list[d
     ]
 
 
-def retrieve_node(state: ChatState) -> dict:
-    """问题向量化后，在「文档 chunks」和「笔记 note_chunks」两张表里各查最近邻，
-    按距离跨类型合并，取 TOP_K 条作为参考资料。"""
-    query_vec = _embed_query(state["question"])
+def _search_knowledge(user_id: str, question: str) -> tuple[list[dict], float]:
+    """文档 chunks + 笔记 note_chunks 联合最近邻检索。
 
-    # 1) 用户上传的文档（documents → chunks）
+    返回 (带 dist 的命中列表(已按距离升序取前 TOP_K), 最相似距离 best_dist)。
+    best_dist = 1.0 表示知识库里没有任何可检索内容。
+    """
+    query_vec = _embed_query(question)
+
     doc_sql = (
         'SELECT %s AS source_type, d.name, c.content, '
         '(c.embedding <=> %s::vector) AS dist '
@@ -187,11 +161,9 @@ def retrieve_node(state: ChatState) -> dict:
         'ORDER BY dist LIMIT %s'
     )
     doc_hits = _retrieve_one_type(
-        doc_sql, ["document", _vector_literal(query_vec), state["user_id"], PER_TYPE_K],
-        query_vec,
+        doc_sql, ["document", _vector_literal(query_vec), user_id, PER_TYPE_K]
     )
 
-    # 2) 用户自己的笔记（notes → note_chunks，标题作为展示名）
     note_sql = (
         'SELECT %s AS source_type, COALESCE(n.title, \'未命名笔记\') AS name, c.content, '
         '(c.embedding <=> %s::vector) AS dist '
@@ -200,20 +172,79 @@ def retrieve_node(state: ChatState) -> dict:
         'ORDER BY dist LIMIT %s'
     )
     note_hits = _retrieve_one_type(
-        note_sql, ["note", _vector_literal(query_vec), state["user_id"], PER_TYPE_K],
-        query_vec,
+        note_sql, ["note", _vector_literal(query_vec), user_id, PER_TYPE_K]
     )
 
     hits = sorted(doc_hits + note_hits, key=lambda r: r["dist"])[:TOP_K]
+    best = hits[0]["dist"] if hits else 1.0
+    return hits, best
+
+
+# ---------------- LLM 兜底判断（仅当向量预检未强命中时） ----------------
+def _build_judge_messages(question: str, history: list[dict]) -> list:
+    system = (
+        "你是 NoteMind 的「知识库意图路由器」。系统已提前对用户的知识库做过一次向量检索，"
+        "但**没有发现与这个问题足够相关的内容**。现在需要你兜底判断：这个问题是否仍然"
+        "必须依赖「用户自己上传的文档或笔记」才能回答。\n"
+        '只输出严格 JSON（不要 Markdown、不要解释）：{"need_knowledge": true 或 false}\n\n'
+        "输出 true 的场景：\n"
+        "- 用户明确要求查看/总结/引用自己的资料：“我的笔记/文档里…”“总结我的笔记”"
+        "“我上传的…”“把 XX 整理成…”；\n"
+        "- 问题引用了前面对话中已出现的用户资料内容（如“那个文件”“它的结论”）。\n"
+        "输出 false：寒暄、纯粹通用知识问答、创作请求、与个人资料无关的问题。\n"
+        "拿不准时倾向 false。"
+    )
+    messages: list = [SystemMessage(content=system)]
+    for item in history[-6:]:  # 只带最近 6 条上下文帮助理解“它/那个文件”这类指代
+        role = item.get("role")
+        content = str(item.get("content", ""))[:1000]
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=question))
+    return messages
+
+
+async def _llm_judge(state: ChatState) -> bool:
+    """非流式小调用，温度 0 提高稳定性。"""
+    llm = _make_llm(state.get("llm") or {}, temperature=0.0, streaming=False)
+    resp = await llm.ainvoke(
+        _build_judge_messages(state["question"], state.get("history") or [])
+    )
+    return _parse_need_knowledge(_to_text(resp.content))
+
+
+# ---------------- 节点 1：路由（向量预检优先 + LLM 兜底） ----------------
+async def route_node(state: ChatState) -> dict:
+    """决定本次是否带知识库上下文生成。
+
+    - 向量预检命中（best_dist <= SIM_CUTOFF）→ 直接用检索结果；
+    - 未命中 → LLM 兜底判断（覆盖“总结我的笔记”、指代追问等表述）。
+    只要最终判定命中且确有内容，就把 topK 参考资料放 context 交给 generate。
+    """
+    hits, best = _search_knowledge(state["user_id"], state["question"])
+
+    if best <= SIM_CUTOFF:
+        use_context = True
+        judge = None
+    else:
+        judge = await _llm_judge(state)
+        # LLM 判 true 但库里根本没内容时，退化为普通回答，避免无据硬答
+        use_context = bool(judge) and bool(hits)
+
     context = [
-        {"type": h["type"], "name": h["name"], "content": h["content"]} for h in hits
+        {"type": h["type"], "name": h["name"], "content": h["content"]}
+        for h in (hits if use_context else [])
     ]
-    logger.info("retrieve user=%s doc=%d note=%d total=%d",
-                state["user_id"], len(doc_hits), len(note_hits), len(context))
-    return {"context": context}
+    logger.info(
+        "route user=%s best_dist=%.3f llm_judge=%s use_context=%s hits=%d",
+        state["user_id"], best, judge, use_context, len(context),
+    )
+    return {"need_knowledge": use_context, "context": context}
 
 
-# ---------------- 节点 3：生成 ----------------
+# ---------------- 节点 2：生成 ----------------
 def _build_generate_system(context: list[dict]) -> str:
     """带检索上下文时要求依据资料作答并标注引用；无上下文时回到通用助手。"""
     if not context:
@@ -263,20 +294,12 @@ async def generate_node(state: ChatState) -> dict:
 
 
 # ---------------- 图编译 ----------------
-def _route(state: ChatState) -> str:
-    return "retrieve" if state.get("need_knowledge") else "generate"
-
-
 def _build_graph():
     builder = StateGraph(ChatState)
-    builder.add_node("judge_node", judge_node)
-    builder.add_node("retrieve_node", retrieve_node)
+    builder.add_node("route_node", route_node)
     builder.add_node("generate_node", generate_node)
-    builder.add_edge(START, "judge_node")
-    builder.add_conditional_edges(
-        "judge_node", _route, {"retrieve": "retrieve_node", "generate": "generate_node"}
-    )
-    builder.add_edge("retrieve_node", "generate_node")
+    builder.add_edge(START, "route_node")
+    builder.add_edge("route_node", "generate_node")
     builder.add_edge("generate_node", END)
     return builder.compile()
 
@@ -321,21 +344,15 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             async for event in _chat_graph.astream_events(
                 state, config={"recursion_limit": 10}, version="v2"
             ):
-                # 1) judge 结束：先推意图路由结果（mode 帧）
+                # 1) route_node 结束：推意图路由结果（mode 帧），命中则推参考来源
                 if (
                     event["event"] == "on_chain_end"
-                    and event.get("name") == "judge_node"
+                    and event.get("name") == "route_node"
                 ):
                     output = event.get("data", {}).get("output") or {}
                     need = bool(output.get("need_knowledge"))
                     yield _sse({"mode": "knowledge" if need else "chat"})
-                # 2) 检索结束：命中则推参考来源（先于正文）
-                if (
-                    event["event"] == "on_chain_end"
-                    and event.get("name") == "retrieve_node"
-                ):
-                    data = event.get("data", {}).get("output") or {}
-                    sources = data.get("context") or []
+                    sources = output.get("context") or []
                     if sources:
                         yield _sse({
                             "sources": [
