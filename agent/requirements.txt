@@ -1,0 +1,93 @@
+# =========================================================
+# NoteMind Agent Service —— Python FastAPI + LangChain/LangGraph
+# 职责：多模态文件读取、分片、向量化（阿里百炼）、RAG Agent 对话
+# 部署：Vercel（Python runtime 3.12，FastAPI 零配置）
+# 本地：conda activate notemind-agent
+#
+# 版本策略：对齐 LangChain 1.x / LangGraph 1.x 最新主线，
+# 不引入无法在 Vercel Serverless 上部署的重型依赖（torch/unstructured/jupyter 等）。
+# =========================================================
+
+# =========================================================
+# Web 服务 / API / SSE
+# 作用：FastAPI 服务、SSE 流式通信、HTTP 客户端
+# =========================================================
+fastapi==0.135.1
+uvicorn==0.46.0
+sse-starlette==3.3.4
+httpx==0.28.1
+orjson==3.11.7
+
+# =========================================================
+# 配置管理 / 数据校验 / 序列化
+# 作用：读取 .env、Pydantic 配置
+# =========================================================
+python-dotenv==1.2.1
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# =========================================================
+# LangChain 核心框架
+# 作用：langchain-core 抽象 + 文本切分器（向量化直接用 langchain-openai 接 SiliconFlow）
+# 说明：不引入 langchain 全家桶 / classic / experimental，serverless 体积控制
+# =========================================================
+langchain-core==1.2.18
+langchain-text-splitters==1.1.1
+
+# =========================================================
+# LLM / 向量 / 视觉接入（SiliconFlow + DeepSeek，均走 OpenAI 兼容协议）
+# 作用：DeepSeek 对话走 langchain-openai；embedding 用 SiliconFlow BAAI/bge-m3；
+#       图片理解用 SiliconFlow 免费视觉模型（OpenAI 兼容 chat/completions）
+# =========================================================
+langchain-openai==1.1.11
+openai==2.26.0
+
+# =========================================================
+# LangGraph / Agent 编排
+# 作用：构建 RAG Agent、状态图、多步骤工作流、PostgreSQL 会话检查点
+# =========================================================
+langgraph==1.1.2
+langgraph-checkpoint-postgres==3.0.5
+psycopg[binary]==3.3.3
+psycopg-pool==3.3.0
+
+# =========================================================
+# 鉴权
+# 作用：web BFF 用 PyJWT(AUTH_SECRET) 签发 X-Service-Token，agent 校验
+# =========================================================
+PyJWT==2.10.1
+
+# =========================================================
+# 多模态文档解析（纯 Python / 轻量，可在 Serverless 运行）
+# 作用：PDF、Word、PPT、Excel、Markdown、HTML 等 Loader 支持
+# 注意：图片走 SiliconFlow 视觉模型 API，不用本地 OCR（避免 torch/opencv）
+# =========================================================
+pypdf==6.10.2
+pdfminer.six==20260107
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+Markdown==3.10.2
+beautifulsoup4==4.14.3
+lxml==6.1.0
+filetype==1.2.0
+
+# ===========如下注释部分，留给"本地重型 RAG 实验环境"，不要安装进 Vercel===============
+
+# =========================================================
+# 本地向量库 / 工具（本项目用 Neon pgvector，Milvus 可选）
+# =========================================================
+# langchain-milvus==0.3.3
+# pymilvus==2.6.12
+
+# =========================================================
+# 本地文档深度解析（unstructured 依赖 torch/torchvision，Serverless 不可用）
+# 若本机跑重型管道可单独激活：
+# unstructured==0.20.6
+# pypdfium2==5.8.0
+# pikepdf==10.5.1
+# pillow==12.2.0
+# opencv-python==4.13.0.92
+# torch==2.11.0
+# torchvision==0.26.0
+# =========================================================

@@ -16,6 +16,7 @@ import { signOut } from "next-auth/react";
 const links = [
   { href: "/", label: "首页" },
   { href: "/notes", label: "笔记" },
+  { href: "/library", label: "知识库" },
   { href: "/tags", label: "标签" },
   { href: "/chat", label: "AI 对话" },
 ];

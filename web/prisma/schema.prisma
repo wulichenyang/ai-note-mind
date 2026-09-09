@@ -22,6 +22,7 @@ model User {
   notes             Note[] // 一对多：一个用户有多篇笔记
   tags              Tag[]
   chats             Chat[]
+  documents         Document[] // 上传的知识库文档
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -84,4 +85,48 @@ model ChatMessage {
 
   @@index([chatId])
   @@map("chat_messages")
+}
+
+// ============ RAG 知识库（Todo 3+）============
+// 设计原则：
+//   - 元数据（Document + Chunk 文本）由 Prisma 管理（web 端）
+//   - embedding 向量列声明为 Unsupported，Prisma 不读写它，
+//     由 agent(Python/psycopg) 直写 SQL，天然实现两服务职责分离
+//   - 文本切分/向量化在 agent 侧完成后，把 embedding 写回同一张表
+
+// 文档表：用户上传的原始文件（PDF/Word/图片/Markdown 等）
+model Document {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String // 原始文件名，如 report.pdf
+  contentType String   @map("content_type") // MIME 类型
+  sizeBytes   Int      @map("size_bytes") // 文件字节数
+  storageKey  String   @map("storage_key") // 对象存储 Key / 内网 URL
+  status      String   @default("uploaded") // uploaded | processing | ready | failed
+  error       String? // status=failed 时的原因
+  chunkCount  Int      @default(0) @map("chunk_count")
+  chunks      Chunk[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerId])
+  @@map("documents")
+}
+
+// 分片表：文档切分后的文本块 + embedding 向量
+model Chunk {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  seq        Int // 分片序号 0,1,2...
+  content    String   @db.Text
+  // text-embedding-v3 默认输出 1024 维；nullable 使 Prisma 可只写元数据，
+  // embedding 由 agent 用原生 SQL 回填（TODO: 追加 HNSW 索引）
+  embedding  Unsupported("vector(1024)")?
+  createdAt  DateTime @default(now())
+
+  @@unique([documentId, seq])
+  @@index([documentId])
+  @@map("chunks")
 }

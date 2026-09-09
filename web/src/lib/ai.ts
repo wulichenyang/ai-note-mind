@@ -31,6 +31,26 @@ export type AiClient = {
   model: string;
 };
 
+/** 解密出的用户 Key 信息（供 agent 侧 BYOK 使用，绝不出服务端） */
+export type AiSecret = {
+  apiKey: string;
+  model: string;
+  baseUrl: string;
+};
+
+export async function getUserAiSecret(userId: string): Promise<AiSecret | null> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { aiApiKeyEncrypted: true, aiModel: true },
+  });
+  if (!user?.aiApiKeyEncrypted) return null;
+  return {
+    apiKey: decrypt(user.aiApiKeyEncrypted),
+    model: user.aiModel?.trim() || DEFAULT_MODEL,
+    baseUrl: baseURL,
+  };
+}
+
 /**
  * 获取某用户自己的 AI 客户端
  * -------------------------------------------------
@@ -38,17 +58,9 @@ export type AiClient = {
  * 未配置 Key 的用户返回 null，调用方返回 403 提示去设置页配置。
  */
 export async function getUserAiClient(userId: string): Promise<AiClient | null> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { aiApiKeyEncrypted: true, aiModel: true },
-  });
-  if (!user?.aiApiKeyEncrypted) return null;
-
-  const apiKey = decrypt(user.aiApiKeyEncrypted);
-  return {
-    client: new OpenAI({ apiKey, baseURL }),
-    model: user.aiModel?.trim() || DEFAULT_MODEL,
-  };
+  const secret = await getUserAiSecret(userId);
+  if (!secret) return null;
+  return { client: new OpenAI({ apiKey: secret.apiKey, baseURL }), model: secret.model };
 }
 
 /**

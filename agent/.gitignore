@@ -1,0 +1,9 @@
+# NoteMind Agent Service —— Python 生成物忽略规则
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
