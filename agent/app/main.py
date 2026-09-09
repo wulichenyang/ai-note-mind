@@ -7,19 +7,19 @@ import time
 
 from fastapi import FastAPI, Request
 
+from app.chat import router as chat_router
 from app.config import settings
 from app.ingest import router as ingest_router
-from app.rag import router as rag_router
 
 app = FastAPI(
     title="NoteMind Agent Service",
     version="0.1.0",
-    description="多模态读取 / 分片 / 向量化 / RAG Agent 对话",
+    description="多模态读取 / 分片 / 向量化 / 意图路由对话",
 )
 
 # 业务路由统一挂 /api 下；前缀与 web BFF 的转发路径对应
 app.include_router(ingest_router, prefix="/api")
-app.include_router(rag_router, prefix="/api")
+app.include_router(chat_router, prefix="/api")
 
 
 @app.middleware("http")

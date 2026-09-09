@@ -61,12 +61,16 @@ export default async function ChatShell({
       await prisma.chatMessage.findMany({
         where: { chatId: activeChatId },
         orderBy: { createdAt: "asc" },
-        select: { id: true, role: true, content: true },
+        select: { id: true, role: true, content: true, sources: true },
       })
     ).map((m) => ({
       id: m.id,
       role: m.role as "user" | "assistant",
       content: m.content,
+      // sources: [{type, name, content}]，AI 命中知识库时写入
+      ...(m.sources && Array.isArray(m.sources)
+        ? { sources: m.sources as ChatMessageDto["sources"] }
+        : {}),
     }));
   }
 

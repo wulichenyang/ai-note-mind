@@ -33,9 +33,23 @@ export async function callAgentIngest(documentId: string): Promise<void> {
   }
 }
 
-/** 打开到 agent /api/rag 的 SSE 流（BFF 透传用），供路由内按事件转换 */
-export function openRagSse(payload: object): Promise<Response> {
-  return fetch(agentUrl("/api/rag"), {
+/** 笔记保存后触发向量索引重建（agent 同步执行，超时上限 50s） */
+export async function callAgentIngestNote(noteId: string): Promise<void> {
+  const resp = await fetch(agentUrl("/api/ingest/note"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ note_id: noteId }),
+    signal: AbortSignal.timeout(50_000),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `agent 返回 ${resp.status}`);
+  }
+}
+
+/** 打开到 agent /api/chat 的 SSE 流（AI 对话意图路由，BFF 转发用） */
+export function openChatSse(payload: object): Promise<Response> {
+  return fetch(agentUrl("/api/chat"), {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(payload),

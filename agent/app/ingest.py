@@ -36,6 +36,10 @@ class IngestRequest(BaseModel):
     document_id: str
 
 
+class IngestNoteRequest(BaseModel):
+    note_id: str
+
+
 def _download(storage_key: str) -> bytes:
     """从 Vercel Blob 下载原文件（public store 的 URL 直接可读）。"""
     with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
@@ -260,7 +264,56 @@ def process_document(document_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def process_note(note_id: str) -> dict:
+    """笔记向量化：标题+正文合并切分 → 向量化 → 事务重建 note_chunks。
+
+    web 在笔记每次保存后同步调用（同一 author 的笔记都是 AI 对话检索源）。
+    失败时抛 HTTPException，旧索引由调用方决定是否保留（事务未提交则回滚删除）。
+    """
+    with db_connect() as conn:
+        note = conn.execute(
+            "SELECT id, title, content FROM notes WHERE id = %s", (note_id,)
+        ).fetchone()
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+
+    # 标题作为检索时的强信号拼在最前（标题本身往往就是主题词）
+    text = f"{note['title'] or ''}\n\n{note['content'] or ''}"
+    chunks = _split_text(text)
+
+    vectors: list[list[float]] = []
+    if chunks:
+        vectors = _embed_documents(chunks)
+        if len(vectors) != len(chunks):
+            raise RuntimeError(
+                f"向量数量({len(vectors)})与分片数量({len(chunks)})不一致"
+            )
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            # 重建语义：清空该笔记旧分片，再写入新分片（空笔记 = 清空索引）
+            cur.execute('DELETE FROM note_chunks WHERE "noteId" = %s', (note_id,))
+            for seq, (content, vec) in enumerate(zip(chunks, vectors)):
+                vector_literal = "[" + ",".join(repr(float(v)) for v in vec) + "]"
+                cur.execute(
+                    "INSERT INTO note_chunks "
+                    '(id, "noteId", seq, content, embedding, "createdAt") '
+                    "VALUES (%s, %s, %s, %s, %s::vector, now())",
+                    (uuid.uuid4().hex, note_id, seq, content, vector_literal),
+                )
+        conn.commit()
+
+    logger.info("ingested note=%s chunks=%d", note_id, len(chunks))
+    return {"note_id": note_id, "status": "ready", "chunks": len(chunks)}
+
+
 @router.post("")
 def run_ingest(req: IngestRequest) -> dict:
     """web 上传完成后调用：同步解析入库。"""
     return process_document(req.document_id)
+
+
+@router.post("/note")
+def run_ingest_note(req: IngestNoteRequest) -> dict:
+    """笔记保存后调用：同步重建该笔记的向量索引。"""
+    return process_note(req.note_id)

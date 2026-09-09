@@ -1,27 +1,44 @@
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/auth";
-import { getUserAiClient, streamChatRaw, toSseResponse } from "@/lib/ai";
+import { getUserAiSecret, toSseResponse } from "@/lib/ai";
+import { openChatSse } from "@/lib/agent";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * AI 对话路由
+ * AI 对话路由（agent BFF 代理 + 会话持久化）
  * POST /api/chat  { chatId?: string, content: string }
  * -------------------------------------------------
- * 功能：
- * 1. 校验登录 + 会话所有权（多租户隔离）
+ * 链路：
+ * 1. 校验登录 + 会话所有权（多租户隔离）；无 chatId 自动新建会话
  * 2. 用用户自己的 DeepSeek Key（BYOK），未配置返回 403
- * 3. 无 chatId 时自动新建会话（取首条消息前 20 字做标题）
- * 4. 持久化用户消息，读取历史消息（最近 20 条）
- * 5. RAG：把用户最近 8 篇笔记的标题+摘要注入 system prompt
- * 6. 流式生成，边流边在结束帧持久化完整助手回复
- * 7. 首帧 SSE 元数据返回 chatId，前端据此更新 URL / 侧栏
- *
- * 为什么在这里持久化而非前端再发一次请求？
- * 服务端在生成结束时已持有完整文本，一次请求完成"生成+存储"，
- * 前端只管渲染，逻辑更内聚、也避免二次请求带来的不一致。
+ * 3. 持久化用户消息，读取历史消息（最近 20 条）
+ * 4. 转发给 agent /api/chat：由 agent 先做「是否读知识库」的意图路由，
+ *    命中则检索（文档 chunks + 笔记 note_chunks）后带引用生成，否则普通生成
+ * 5. 把 agent 内部 SSE 帧转换为 OpenAI 标准流给前端；
+ *    其中 sources 帧内联成 __sources 事件供前端渲染引用来源
+ * 6. 生成结束时把完整回复 + 引用来源回存为 assistant 消息
  */
+
+type AgentFrame = {
+  mode?: "knowledge" | "chat";
+  sources?: { type: "document" | "note"; name: string; content: string }[];
+  token?: string;
+  error?: string;
+  done?: boolean;
+};
+
+function sseDataParser(): (frame: string) => AgentFrame {
+  return (frame) => {
+    if (!frame.startsWith("data: ")) return {};
+    try {
+      return JSON.parse(frame.slice(6)) as AgentFrame;
+    } catch {
+      return {};
+    }
+  };
+}
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -30,8 +47,8 @@ export async function POST(req: Request) {
   }
 
   // 用户未配置自己的 Key：403 引导去设置页
-  const ai = await getUserAiClient(session.user.id);
-  if (!ai) {
+  const secret = await getUserAiSecret(session.user.id);
+  if (!secret) {
     return Response.json(
       { error: "你还没有配置 DeepSeek Key，请到「设置」页填写后使用" },
       { status: 403 },
@@ -65,79 +82,100 @@ export async function POST(req: Request) {
   }
 
   // 2. 持久化用户消息 + 更新会话活跃时间
-  //    两次独立写操作放进 $transaction：原子性 + 一次网络往返
   await prisma.$transaction([
     prisma.chatMessage.create({
       data: { chatId: chat.id, role: "user", content: trimmed },
     }),
-    // 更新"最近活跃时间"（@updatedAt），让本会话在列表中置顶
     prisma.chat.update({
       where: { id: chat.id },
       data: { updatedAt: new Date() },
     }),
   ]);
 
-  // 3. 两个只读查询独立，并行执行消除 waterfall：
-  //    - 历史消息（最近 20 条，倒序取再反转回正序）
-  //    - RAG 笔记（最近 8 篇标题+摘要，注入 system prompt）
-  const [history, notes] = await Promise.all([
-    prisma.chatMessage.findMany({
-      where: { chatId: chat.id },
-      orderBy: { createdAt: "desc" },
-      take: 20,
-    }),
-    prisma.note.findMany({
-      where: { authorId: userId },
-      orderBy: { updatedAt: "desc" },
-      take: 8,
-      select: { title: true, content: true },
-    }),
-  ]);
-  history.reverse();
-  const ragContext = notes
-    .map((n) => `- ${n.title}：${n.content.slice(0, 200)}`)
-    .join("\n");
-
-  const system = `你是一个知识库 AI 助手（NoteMind），只基于用户自己的笔记回答问题。
-
-用户最近笔记（标题：内容摘要）：
-${ragContext || "（用户还没有笔记）"}
-
-回答要求：
-1. 优先引用上述笔记内容作答，可标注来源标题，如（来源：《xxx》）
-2. 笔记不足以回答时，诚实说明，并给出通用建议
-3. 使用简洁、自然的中文，结构化内容用 Markdown 列表`;
-
-  // 5. 流式生成：逐片转发给前端，同时累计全文，结束时持久化助手消息
-  let full = "";
-  const generator = streamChatRaw({
-    client: ai.client,
-    model: ai.model,
-    system,
-    messages: history.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    })),
-    temperature: 0.7,
-    maxTokens: 2048,
+  // 3. 读取历史消息（最近 20 条，倒序取再反转回正序），交给 agent 理解追问
+  const history = await prisma.chatMessage.findMany({
+    where: { chatId: chat.id },
+    orderBy: { createdAt: "desc" },
+    take: 20,
   });
+  history.reverse();
 
-  const withPersist = (async function* () {
+  // 4. 建到 agent /api/chat 的 SSE：agent 内部做意图路由 + 检索 + 生成
+  //    边收边转 OpenAI 标准格式；sources 帧内联透传给前端展示引用来源
+  const generator = (async function* () {
+    let full = "";
+    let sources: AgentFrame["sources"] = [];
     try {
-      for await (const delta of generator) {
-        full += delta;
-        yield delta;
+      let resp: Response;
+      try {
+        resp = await openChatSse({
+          user_id: userId,
+          question: trimmed,
+          history: history.map((m) => ({
+            role: m.role as "user" | "assistant",
+            content: m.content,
+          })),
+          llm: {
+            api_key: secret.apiKey,
+            model: secret.model,
+            base_url: secret.baseUrl,
+          },
+        });
+      } catch (err) {
+        throw new Error(`AI 服务不可用：${(err as Error).message}`);
+      }
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(
+          (body as { detail?: string }).detail ?? `AI 服务返回 ${resp.status}`,
+        );
+      }
+      if (!resp.body) throw new Error("AI 服务无响应");
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      const parse = sseDataParser();
+      let buffer = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const evt = parse(frame);
+            if (evt.error) throw new Error(evt.error);
+            if (evt.sources?.length) {
+              sources = evt.sources;
+              yield { __sources: evt.sources };
+            }
+            if (evt.token) {
+              full += evt.token;
+              yield evt.token;
+            }
+            if (evt.done) return;
+          }
+        }
+      } finally {
+        reader.releaseLock();
       }
     } finally {
-      // 无论正常结束还是被中断，只要生成了内容就保存（避免丢失半截回复）
+      // 无论正常结束还是被中断，只要生成了内容就保存（避免丢失半截回复），
+      // 同时把本次命中的引用来源回存到 assistant 消息上
       if (full.trim()) {
         await prisma.chatMessage.create({
-          data: { chatId: chat.id, role: "assistant", content: full },
+          data: {
+            chatId: chat.id,
+            role: "assistant",
+            content: full,
+            ...(sources.length ? { sources } : {}),
+          },
         });
       }
     }
   })();
 
-  // 6. 首帧注入 chatId 元数据
-  return toSseResponse(withPersist, { chatId: chat.id });
+  // 5. 首帧注入 chatId 元数据，前端据此更新 URL / 侧栏
+  return toSseResponse(generator, { chatId: chat.id });
 }

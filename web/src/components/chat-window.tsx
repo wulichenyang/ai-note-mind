@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, memo } from "react";
 import { useRouter } from "next/navigation";
-import { Send, Square, Sparkles, Loader2, MessageSquareText, Menu } from "lucide-react";
+import { Send, Square, Sparkles, Loader2, MessageSquareText, Menu, ChevronDown, FileText, StickyNote } from "lucide-react";
 import ChatSidebar, { type SidebarChat } from "@/components/chat-sidebar";
 import ChatMarkdown from "@/components/chat-markdown";
 
@@ -18,10 +18,17 @@ import ChatMarkdown from "@/components/chat-markdown";
 // 为什么是客户端？需要 fetch + ReadableStream 逐块渲染，
 // 以及输入框的即时交互状态。
 
+export type ChatSource = {
+  type: "document" | "note";
+  name: string;
+  content: string;
+};
+
 export type ChatMessageDto = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  sources?: ChatSource[];
 };
 
 type ChatWindowProps = {
@@ -52,19 +59,75 @@ const UserBubble = memo(function UserBubble({ content }: { content: string }) {
   );
 });
 
+// 引用来源块：可折叠，列出本次回答检索到的资料
+const SourceRefs = memo(function SourceRefs({
+  sources,
+}: {
+  sources: ChatSource[];
+}) {
+  const [open, setOpen] = useState(false);
+  if (!sources.length) return null;
+  return (
+    <div className="mt-2 border-t border-[#8b5cf6]/10 pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 rounded-full px-1 text-[11px] font-medium text-[#7c3aed] transition-colors hover:bg-[#8b5cf6]/10"
+      >
+        <ChevronDown
+          className={`h-3 w-3 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+          strokeWidth={2.5}
+        />
+        参考了 {sources.length} 份知识库资料
+      </button>
+      {open && (
+        <ul className="mt-1.5 space-y-1.5">
+          {sources.map((s, i) => {
+            const Icon = s.type === "document" ? FileText : StickyNote;
+            return (
+              <li
+                key={`${s.type}-${s.name}-${i}`}
+                className="flex gap-2 rounded-lg border border-black/5 bg-white/50 px-2 py-1.5"
+              >
+                <Icon
+                  className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${s.type === "note" ? "text-[#a855f7]" : "text-[#6366f1]"}`}
+                  strokeWidth={2.2}
+                />
+                <div className="min-w-0">
+                  <p className="truncate text-[12px] font-semibold text-zinc-700">
+                    {s.type === "note" ? "笔记" : "文档"}《{s.name}》
+                  </p>
+                  <p className="line-clamp-2 text-[11px] leading-relaxed text-zinc-500">
+                    {s.content}
+                  </p>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+});
+
 // 助手消息气泡：memo 化，Markdown 走懒加载组件
 const AssistantBubble = memo(function AssistantBubble({
   content,
   streaming,
+  sources,
 }: {
   content: string;
   streaming: boolean;
+  sources?: ChatSource[];
 }) {
   return (
     <div className="flex justify-start">
       <div className="max-w-[80%] rounded-2xl rounded-bl-md border border-white/70 bg-white/70 px-4 py-3 text-[14px] leading-relaxed text-zinc-700 shadow-[0_2px_12px_rgba(0,0,0,0.04)] backdrop-blur-xl">
         {content ? (
-          <ChatMarkdown content={content} />
+          <>
+            <ChatMarkdown content={content} />
+            {sources && <SourceRefs sources={sources} />}
+          </>
         ) : streaming ? (
           <span className="flex items-center gap-2 text-zinc-400">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -196,6 +259,16 @@ export default function ChatWindow({
                 return [target, ...others];
               });
             }
+          } else if (json.__sources) {
+            // 命中知识库：把引用来源挂到正在生成的助手消息上
+            const sources = json.__sources as ChatSource[];
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last.role !== "assistant") return prev;
+              next[next.length - 1] = { ...last, sources };
+              return next;
+            });
           } else if (json.error) {
             throw new Error(json.error as string);
           } else {
@@ -300,6 +373,7 @@ export default function ChatWindow({
                 key={m.id}
                 content={m.content}
                 streaming={loading}
+                sources={m.sources}
               />
             ),
           )

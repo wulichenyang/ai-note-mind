@@ -102,12 +102,22 @@ export async function* streamChatRaw(params: {
 }
 
 /**
+ * SSE 流项：纯字符串 = 普通 token 增量；带 __ 前缀键的对象 = 内联元数据帧
+ * （如 {__sources:[...]}），原样序列化为 data: 事件，供前端中途更新状态。
+ */
+export type SseItem =
+  | string
+  | { __meta?: Record<string, unknown> }
+  | { __sources?: { type: "document" | "note"; name: string; content: string }[] };
+
+/**
  * 把文本增量流包装成 OpenAI 标准 SSE Response
  * meta 可选：在首帧注入自定义元数据（如 chatId），
  * 前端解析 data: {"__meta":{...}} 用于更新 URL / 侧栏。
+ * stream 里除了字符串 token，也可 yield SseItem 元数据帧。
  */
 export function toSseResponse(
-  stream: AsyncIterable<string>,
+  stream: AsyncIterable<SseItem>,
   meta?: Record<string, unknown>,
 ) {
   const encoder = new TextEncoder();
@@ -119,11 +129,18 @@ export function toSseResponse(
             encoder.encode(`data: ${JSON.stringify({ __meta: meta })}\n\n`),
           );
         }
-        for await (const delta of stream) {
-          const payload = JSON.stringify({
-            choices: [{ delta: { content: delta } }],
-          });
-          controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+        for await (const item of stream) {
+          if (typeof item === "string") {
+            const payload = JSON.stringify({
+              choices: [{ delta: { content: item } }],
+            });
+            controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+          } else {
+            // 内联元数据帧（如 __sources）原样透传给前端
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(item)}\n\n`),
+            );
+          }
         }
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       } catch (err) {

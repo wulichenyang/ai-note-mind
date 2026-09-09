@@ -1,15 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   UploadCloud,
   Loader2,
   Trash2,
   RefreshCw,
-  MessageCircleQuestion,
-  Square,
   FileText,
   FileImage,
   FileSpreadsheet,
@@ -17,6 +14,7 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  MessageSquareText,
 } from "lucide-react";
 
 type DocItem = {
@@ -48,7 +46,7 @@ const ACCEPT = [
 const STATUS_META: Record<string, { label: string; icon: typeof Clock; cls: string }> = {
   uploaded: { label: "排队解析", icon: Clock, cls: "text-amber-600 bg-amber-500/10" },
   processing: { label: "解析中", icon: Loader2, cls: "text-indigo-600 bg-indigo-500/10" },
-  ready: { label: "可问答", icon: CheckCircle2, cls: "text-emerald-600 bg-emerald-500/10" },
+  ready: { label: "已就绪", icon: CheckCircle2, cls: "text-emerald-600 bg-emerald-500/10" },
   failed: { label: "解析失败", icon: XCircle, cls: "text-rose-600 bg-rose-500/10" },
 };
 
@@ -73,13 +71,6 @@ function humanSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type QaState = {
-  question: string;
-  answer: string;
-  loading: boolean;
-  error: string;
-};
-
 export default function LibraryClient({
   initialDocs,
   aiConfigured,
@@ -91,10 +82,7 @@ export default function LibraryClient({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [askFor, setAskFor] = useState<string | null>(null);
-  const [qa, setQa] = useState<Record<string, QaState>>({});
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   const upsertDoc = (doc: DocItem) =>
     setDocs((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)]);
@@ -151,81 +139,6 @@ export default function LibraryClient({
     }
   };
 
-  // ---------- 单文件问答（SSE 流式） ----------
-  const ask = async (doc: DocItem, question: string) => {
-    setQa((prev) => ({
-      ...prev,
-      [doc.id]: { question, answer: "", loading: true, error: "" },
-    }));
-    abortRef.current = new AbortController();
-    try {
-      const res = await fetch(`/api/files/${doc.id}/ask`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
-        signal: abortRef.current.signal,
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `请求失败（${res.status}）`);
-      }
-
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t.startsWith("data:")) continue;
-          const payload = t.slice(5).trim();
-          if (payload === "[DONE]") continue;
-          try {
-            const json = JSON.parse(payload);
-            if (json.error) throw new Error(json.error);
-            const delta = json.choices?.[0]?.delta?.content ?? "";
-            if (delta) {
-              setQa((prev) => ({
-                ...prev,
-                [doc.id]: {
-                  question,
-                  answer: (prev[doc.id]?.answer ?? "") + delta,
-                  loading: true,
-                  error: "",
-                },
-              }));
-            }
-          } catch (e) {
-            if ((e as Error).message) throw e;
-          }
-        }
-      }
-      setQa((prev) => ({
-        ...prev,
-        [doc.id]: { question, answer: prev[doc.id]?.answer ?? "", loading: false, error: "" },
-      }));
-    } catch (err) {
-      if ((err as Error).name === "AbortError") return;
-      setQa((prev) => ({
-        ...prev,
-        [doc.id]: {
-          question,
-          answer: "",
-          loading: false,
-          error: (err as Error).message || "问答失败",
-        },
-      }));
-    } finally {
-      abortRef.current = null;
-    }
-  };
-
-  const stopAsk = () => abortRef.current?.abort();
-
   const readyCount = docs.filter((d) => d.status === "ready").length;
 
   return (
@@ -267,16 +180,16 @@ export default function LibraryClient({
       </div>
 
       {/* 概览 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-[13px] text-zinc-500">
-          共 {docs.length} 个文件 · {readyCount} 个可问答
+          共 {docs.length} 个文件 · {readyCount} 个已就绪
         </p>
         {!aiConfigured && (
           <a
             href="/settings"
             className="text-[12px] text-zinc-400 underline decoration-dotted underline-offset-2 transition-colors hover:text-[#8b5cf6]"
           >
-            未配置 DeepSeek Key，去设置页填写后即可问答
+            未配置 DeepSeek Key，去设置页填写后即可在 AI 对话中引用这些资料
           </a>
         )}
       </div>
@@ -288,7 +201,7 @@ export default function LibraryClient({
             <FileIcon className="h-5 w-5 text-zinc-400" />
           </div>
           <p className="text-[14px] text-zinc-500">还没有上传文件</p>
-          <p className="mt-1 text-[12px] text-zinc-400">上传后 AI 会切分并建立向量索引，然后就能对它提问</p>
+          <p className="mt-1 text-[12px] text-zinc-400">上传后 AI 会切分并建立向量索引，AI 对话会自动引用这些资料</p>
         </div>
       ) : (
         <ul className="space-y-3">
@@ -297,8 +210,6 @@ export default function LibraryClient({
             const meta = STATUS_META[doc.status] ?? STATUS_META.uploaded;
             const StatusIcon = meta.icon;
             const busy = busyId === doc.id;
-            const open = askFor === doc.id;
-            const q = qa[doc.id];
             return (
               <li key={doc.id} className="glass-card relative overflow-hidden">
                 <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#8b5cf6]/30 to-transparent" />
@@ -329,24 +240,14 @@ export default function LibraryClient({
                     )}
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
-                    {doc.status === "ready" && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAskFor(open ? null : doc.id);
-                          if (!open) {
-                            setQa((p) =>
-                              p[doc.id]
-                                ? p
-                                : { ...p, [doc.id]: { question: "", answer: "", loading: false, error: "" } },
-                            );
-                          }
-                        }}
+                    {doc.status === "ready" && aiConfigured && (
+                      <Link
+                        href="/chat"
                         className="inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-[#6366f1] to-[#a855f7] px-3 py-1.5 text-[12px] font-medium text-white shadow-[0_2px_8px_rgba(139,92,246,0.35)] transition-all hover:shadow-[0_4px_12px_rgba(139,92,246,0.45)] active:scale-95"
                       >
-                        <MessageCircleQuestion className="h-3.5 w-3.5" strokeWidth={2.2} />
-                        {open ? "收起" : "问答"}
-                      </button>
+                        <MessageSquareText className="h-3.5 w-3.5" strokeWidth={2.2} />
+                        去对话提问
+                      </Link>
                     )}
                     {doc.status === "failed" && (
                       <button
@@ -370,80 +271,6 @@ export default function LibraryClient({
                     </button>
                   </div>
                 </div>
-
-                {/* 问答面板 */}
-                {open && (
-                  <div className="border-t border-black/[0.04] p-4">
-                    {!aiConfigured ? (
-                      <a
-                        href="/settings"
-                        className="text-[13px] text-[#8b5cf6] underline decoration-dotted underline-offset-2"
-                      >
-                        先去设置页配置你的 DeepSeek Key 才能问答 →
-                      </a>
-                    ) : (
-                      <>
-                        <div className="flex gap-2">
-                          <input
-                            value={q?.question ?? ""}
-                            onChange={(e) =>
-                              setQa((p) => ({
-                                ...p,
-                                [doc.id]: {
-                                  question: e.target.value,
-                                  answer: p[doc.id]?.answer ?? "",
-                                  loading: false,
-                                  error: "",
-                                },
-                              }))
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                                const v = (q?.question ?? "").trim();
-                                if (v && !q?.loading) ask(doc, v);
-                              }
-                            }}
-                            placeholder={`就《${doc.name}》的内容提问…`}
-                            className="min-w-0 flex-1 rounded-xl border border-black/[0.08] bg-white/70 px-3.5 py-2 text-[13px] text-zinc-800 outline-none transition-all placeholder:text-zinc-400 focus:border-[#8b5cf6]/50 focus:bg-white focus:ring-2 focus:ring-[#8b5cf6]/20"
-                          />
-                          {q?.loading ? (
-                            <button
-                              type="button"
-                              onClick={stopAsk}
-                              className="inline-flex items-center gap-1 rounded-xl border border-black/[0.08] bg-white/70 px-3 py-2 text-[13px] text-zinc-600 transition-colors hover:bg-white active:scale-95"
-                            >
-                              <Square className="h-3.5 w-3.5" strokeWidth={2.2} />
-                              停止
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={!q?.question?.trim()}
-                              onClick={() => ask(doc, (q?.question ?? "").trim())}
-                              className="rounded-xl bg-gradient-to-r from-[#6366f1] to-[#a855f7] px-4 py-2 text-[13px] font-medium text-white shadow-[0_2px_8px_rgba(139,92,246,0.35)] transition-all hover:shadow-[0_4px_12px_rgba(139,92,246,0.45)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              提问
-                            </button>
-                          )}
-                        </div>
-                        {q?.loading && !q.answer && (
-                          <div className="mt-3 flex items-center gap-2 text-[12px] text-zinc-400">
-                            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8b5cf6]" />
-                            正在检索文件内容并生成…
-                          </div>
-                        )}
-                        {q?.error && <p className="mt-3 text-[12px] text-rose-500">{q.error}</p>}
-                        {q?.answer && (
-                          <div className="prose-note mt-4 rounded-xl border border-black/[0.05] bg-white/50 p-4">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {q.answer}
-                            </ReactMarkdown>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
               </li>
             );
           })}

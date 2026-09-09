@@ -39,11 +39,28 @@ model Note {
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   // onDelete: Cascade —— 用户被删除时，其笔记自动级联删除
   tags      Tag[] // 多对多：一篇笔记可挂多个标签
+  noteChunks NoteChunk[] // 笔记向量分片（供 AI 对话检索）
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([authorId]) // 按作者查询是高频操作，加索引
   @@map("notes")
+}
+
+// 笔记向量分片：笔记的文本块 + embedding（供 AI 对话全库检索）
+// 与 chunks 对称 —— agent(psycopg) 直写 embedding，Prisma 只管元数据
+model NoteChunk {
+  id        String   @id @default(cuid())
+  noteId    String
+  note      Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  seq       Int
+  content   String   @db.Text
+  embedding Unsupported("vector(1024)")?
+  createdAt DateTime @default(now())
+
+  @@unique([noteId, seq])
+  @@index([noteId])
+  @@map("note_chunks")
 }
 
 // 标签表
@@ -81,6 +98,7 @@ model ChatMessage {
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
   role      String // "user" | "assistant"
   content   String   @db.Text
+  sources   Json? // 引用来源：[{type:"document"|"note", name, content}]，AI 回复命中知识库时写入
   createdAt DateTime @default(now())
 
   @@index([chatId])

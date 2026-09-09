@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
+import { callAgentIngestNote } from "@/lib/agent";
 
 /**
  * 笔记数据访问层（Server Actions）
@@ -54,6 +55,12 @@ export async function createNoteAction(
     data: { title, content, authorId: user.userId },
   });
 
+  // 同步重建该笔记的向量索引（AI 对话检索源）；失败不阻断保存，
+  // 但打印错误便于排查 —— 知识索引落后于笔记内容
+  await callAgentIngestNote(note.id).catch((e) => {
+    console.error(`[notes] 笔记向量化失败 note=${note.id}`, e);
+  });
+
   // 重新生成列表页的缓存，否则新笔记不显示
   revalidatePath("/notes");
   redirect(`/notes/${note.id}`);
@@ -88,6 +95,11 @@ export async function updateNoteAction(
   if (result.count === 0) {
     return { error: "笔记不存在或无权修改" };
   }
+
+  // 内容已变：同步重建向量索引，保证 AI 对话能检索到最新内容
+  await callAgentIngestNote(noteId).catch((e) => {
+    console.error(`[notes] 笔记向量化失败 note=${noteId}`, e);
+  });
 
   revalidatePath("/notes");
   revalidatePath(`/notes/${noteId}`);
