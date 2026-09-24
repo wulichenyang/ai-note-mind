@@ -22,3 +22,12 @@ __pycache__/
 venv/
 .python-version
 uv.lock
+
+# 部署脚本用到的本地缓存（Vercel CLI 的配置/缓存、npm 缓存）
+# 之所以关在仓库内：CLI 默认写 ~/Library/Application Support/com.vercel.cli，
+# 在受限沙箱环境里会 EPERM 失败
+.vercel-home/
+.npm-cache/
+
+# Vercel 本地关联信息（由 vercel link 生成，含 projectId，不入库）
+.vercel/

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "dev:qa": "dotenv -e .env.qa -- next dev",
     "dev:staging": "dotenv -e .env.staging -- next dev",
+    "postinstall": "prisma generate",
     "build": "next build",
     "build:qa": "dotenv -e .env.qa -- next build",
     "build:staging": "dotenv -e .env.staging -- next build",

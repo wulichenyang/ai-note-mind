@@ -1,0 +1,13 @@
+# Vercel 上传忽略清单（防止把本地密钥传到构建服务器）
+# Vercel CLI 会同时参考 .gitignore，这里显式再声明一次，双保险。
+.env
+.env.*
+!.env.example
+
+node_modules
+.next
+out
+coverage
+*.tsbuildinfo
+next-env.d.ts
+.vercel
